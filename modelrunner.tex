@@ -1,0 +1,42 @@
+\title{Model Runner Design and Implementation}
+
+\section{Introduction}
+
+This document covers the design and implementation of the Model Runner tool.
+This document is a literate programming document, meaning that the source code
+is interwoven into the document. This goes a bit further than other literate
+programming documents because the unit tests and model checks are also included.
+We not only talk about the design in this document, but we test it and prove
+that, to the best of our knowledge and within the limitations of our tooling and
+support libraries, it is correct.
+
+Model Runner is a tool that runs a suite of model checks for a given software
+package. On execution, this tool builds a tree of modules, model checking
+scenarios, header files, and source files. It then optionally reconciles this
+tree against a cache of previous model checking results, and executes any stale
+model checks.  The results are displayed to the user.  Successful model checks
+are optionally cached so they don't have to be re-run until conditions change.
+Finally, it supports extracting settings that can go into a report for other
+literate programming projects.
+
+The first appendix covers how to extract and build the source code for this
+tool.  The remaining sections will cover lexical analysis, parsing, syntax tree
+building, semantic analysis, synthesis, execution, caching, and the
+implementation of the main executable.  Interspersed in these sections are unit
+tests and model checks.  The overall document is fairly long.  For ease of
+development, it is organized into separate pieces that each cover a different
+small aspect of the entire software project. This is done to ensure that
+checkins make sense and that the development process is more natural.
+
+#[include=src/lexer/lexer.tex]
+#[include=src/parser/parser.tex]
+#[include=src/ast/ast.tex]
+#[include=src/analysis/analysis.tex]
+#[include=src/synthesis/synthesis.tex]
+#[include=src/execution/execution.tex]
+#[include=src/caching/caching.tex]
+#[include=src/modelrunner/main.tex]
+
+\appendix
+
+#[include=scripts/building.tex]
