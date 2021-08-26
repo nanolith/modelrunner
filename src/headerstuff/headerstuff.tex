@@ -1,0 +1,48 @@
+\section{Header Related Stuff}
+
+This is a short section covering some preliminaries we need to build header
+files.
+
+First, in each header, there is a preamble.  This preamble includes a pragma
+that tells the compiler to only include this header once.  This way, if it is
+included multiple times through the list of header dependencies, its contents
+will only be read by the preprocessor once.
+
+#[language=c]
+<<header-preamble>>=
+#pragma once
+>>@<<
+
+Language compatibility is another issue.  The C++ language in particular is not
+fully backwards compatible with C.  One significant incompatibility has to do
+with name mangling.  In C++, it is necessary to mangle names in order to add
+concepts to the object file such as namespaces, class membership, and function
+polymorphism.  Neither C nor the linker understand these concepts, so C++
+mangles the names of functions.  If a C++ program includes one of our headers,
+we don't want it to make external symbol references to externals we define, or
+it will complain at link time that it can't find our definitions.  So, we
+incoporate a language feature of C++ that lets it know that all of the
+definitions in our header are C definitions.  We place this, along with the
+preamble, in our header prologue.
+
+#[language=c]
+<<header-prologue>>=
+<<header-preamble>>
+#ifdef   __cplusplus
+extern "C" {
+#endif /*__cplusplus*/
+>>@<<
+
+The extern definition is wrapped in a macro so that it is only interpreted by a
+C++ compiler.  If we use a C compiler, it will not understand this extern
+setting.  The epilogue for our header closes this extern definition.
+
+#[language=C]
+<<header-epilogue>>=
+#ifdef   __cplusplus
+} /* extern "C" */
+#endif /*__cplusplus*/
+>>@<<
+
+Our headers can now make use of the \verb/header-prologue/ and
+\verb/header-epilogue/ macros to automatically include these definitions.

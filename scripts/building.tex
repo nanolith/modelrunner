@@ -1,3 +1,140 @@
-\section{Building Model Runner}
+\section{Building the Model Runner tool}
 
-Not yet implemented.
+To build the model runner tool, we need to extract the source files and the
+build scripts from the document.  The extraction script is the first script that
+we need as part of the build process.  It lists all of the file sections in this
+document, and filters them between executable scripts and regular source files.
+We also want to be able to run the unit tests and model checks for this tool, so
+the related sources, scripts, and definitions will be pulled out for these
+stages as well.
+
+#[language=sh]
+<<FILE:scripts/extract_files.sh>>=#!/bin/sh
+    filename=../modelrunner.tex
+    <<extract-shell-scripts>>
+    <<extract-everything-else>>
+>>@<<
+
+To extract shell scripts, we just run \verb/mintangle/, passing it the \verb/-L/
+option, which instructs it to list all files available for extract. This is
+passed through \verb/egrep/ to filter out just the shell scripts. We iterate
+through this list, extracting each by specifying them with the \verb/-r/, or
+root, option, and then we make each executable in turn.
+
+#[language=sh]
+<<extract-shell-scripts>>=
+    for n in `mintangle -L $filename | egrep ".sh$"`; do
+        mintangle -r $n $filename
+        chmod +x $n
+    done #extract shell scripts from $filename
+>>@<<
+
+The steps for extracting everything else are the same, except that we use the
+\verb/-v/ option with \verb/egrep/ to \emph{exclude} shell scripts, and we don't
+mark these files as executable.
+
+#[language=sh]
+<<extract-everything-else>>=
+    for n in `mintangle -L $filename | egrep -v ".sh$"`; do
+        mintangle -r $n $filename
+    done
+>>@<<
+
+\subsection{Compilation}
+
+Because all of the source files are extracted at once when we run the
+extraction, we can't take advantage of incremental builds without the use of a
+custom build system. That is beyond the scope of this project, so we will just
+use a simple shell script for performing compilation.  There are two executables
+produced as part of the compilation process: the model runner and the unit test
+runner. To build everything, the build shell script gathers all source files,
+builds them, and then links the two executables.
+
+#[language=sh]
+<<FILE:scripts/build.sh>>=#!/bin/sh
+sourcefiles=`find src -name "*.c" -print`
+testfiles=`find test -name "*.c" -print`
+if [ "$CC" == "" ]; then
+  export CC=cc
+fi #set $CC to a sane value
+>>@<<
+
+The script first makes a list of all C source files in the \verb/src/ and
+\verb/test/ subdirectories.  Next, it sets the \verb/CC/ variable if it is not
+already set.
+
+We can then build all of the object files for both source and test. We keep
+these build steps separate in case we need to add options to one or the other.
+
+#[language=sh]
+<<FILE:scripts/build.sh>>=
+#build source files
+for n in $sourcefiles; do
+    $CC -I include -c -o $n.o $n
+    if [ $? -ne 0 ]; then
+        echo "Compilation failed."
+        exit 1
+    fi
+done
+
+#build test files
+for n in $testfiles; do
+    $CC -I include -c -o $n.o $n
+    if [ $? -ne 0 ]; then
+        echo "Compilation failed."
+        exit 1
+    fi
+done
+>>@<<
+
+Once this step is done, we can scan the directories again to pick up all of the
+object files. There are three categories here: objects for the main executable,
+objects for running tests, and objects for including in the tests. Later on, we
+will add some test coverage options to this last category, but for now, we are
+just filtering out the model runner's main method so we can substitute the test
+runner's main method.
+
+#[language=sh]
+<<FILE:scripts/build.sh>>=
+objects=`find src -name "*.o" -print`
+objects_except_main=`echo $objects | grep -v main.c.o`
+testobjects=`find test -name "*.o" -print`
+
+#link modelrunner
+$CC -o modelrunner $objects
+if [ $? -ne 0 ]; then
+    echo "Link failed."
+    exit 1
+fi
+
+#link testmodelrunner
+$CC -o testmodelrunner $objects_except_main $testobjects
+if [ $? -ne 0 ]; then
+    echo "Test link failed."
+    exit 1
+fi
+>>@<<
+
+Finally, we always execute the unit tests as part of the build process.
+
+#[language=sh]
+<<FILE:scripts/build.sh>>=
+./testmodelrunner
+if [ $? -ne 0 ]; then
+    echo "Unit testing failed."
+    exit 1
+fi #$
+>>@<<
+
+\subsection{Building the Document}
+
+To build this document, we just need to run it through \verb/minweave/ and
+\verb/pdflatex/.  We use the \verb/-T/ argument with \verb/minweave/ to pass it
+the template we use for this document.
+
+#[language=sh]
+<<FILE:scripts/build_document.sh>>=#!/bin/sh
+minweave -T ../template.tex ../modelrunner.tex
+pdflatex modelrunner.tex.tex
+pdflatex modelrunner.tex.tex
+>>@<<
