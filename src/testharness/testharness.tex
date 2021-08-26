@@ -1,0 +1,318 @@
+\section{Literate Unit Testing}
+
+The first challenge we encounter when writing a modern literate application is
+finding a way to incorporate unit tests into the narrative. Minweb has a
+facility for capturing test values, running these values through a test
+framework, and pulling the outputs back into the literate document.  We will
+make use of these.  However, we need to develop a way to read these test values,
+input them into unit tests, and capture the output.  We don't want to go through
+a bunch of manual setup for each test, as this would detract from the narrative.
+So, as much as possible, we want to automate this marshalling process so we can
+focus just on the unit tests themselves. Ideally, we want to write these tests
+in the same language that we use for other parts of the application.  In this
+case, we are using modern C for the application.  Thus, we will use C for the
+tests.
+
+Before we get into the design and implementation of marshalling facilities,
+let's start by defining our unit test runner.
+
+\subsection{Unit Test Runner}
+
+The unit test runner iterates through an array of unit test suites, each of
+which are arrays of unit test cases.  Unit test cases are functions taking no
+parameters and returning a Boolean value. If the function returns \verb/true/,
+then the test passes. If the function returns \verb/false/, then the test fails.
+To provide reporting to the user, the array actually contains two items: the
+name of the test and the test function pointer. In order to simplify test
+registration, we will provide a simple macro that expands to both of these items
+when given the name of a test.
+
+Let's start with the test header.  This header will start with the definition of
+our unit test function type.  Then, it will declare the structure that we use
+for holding unit test cases.
+
+#[language=c]
+<<FILE:include/modelrunner/test.h>>=
+<<header-prologue>>
+
+#include <stdbool.h>
+#include <stddef.h>
+
+typedef bool (*unit_test_function)();
+
+typedef struct unit_test_case unit_test_case;
+struct unit_test_case
+{
+    const char* name;
+    unit_test_function function;
+};
+>>@<<
+
+The \verb/unit_test_function/ type defines a function pointer that takes no
+arguments and returns a Boolean (\verb/bool/) value indicating whether the test
+passed (\verb/true/) or the test failed (\verb/false/). The
+\verb/unit_test_case/ type is a structure containing the name of the unit test
+and the function to call to run this unit test.
+
+Next, we define the \verb/unit_test_suite/ type that we use for defining test
+suites.
+
+#[language=c]
+<<FILE:include/modelrunner/test.h>>=
+typedef struct unit_test_suite unit_test_suite;
+struct unit_test_suite
+{
+    const char* name;
+    unit_test_case* array;
+    size_t entries;
+};
+>>@<<
+
+The \verb/unit_test_suite/ has a name, an array, and a number of entries in the
+suite. Now, we can create some helper macros that will make life easier for
+defining test suites and test cases. The first macro, \verb/TEST_SUITE/, will
+expand to the name of the test suite, the test suite array, and the number of
+entries in the test suite. The \verb/TEST_SUITE_DECL/ macro provides us a helper
+for declaring the test suite array.
+
+#[language=c]
+<<FILE:include/modelrunner/test.h>>=
+#define TEST_SUITE(suite) \
+    { .name = #suite, .array = suite ## _array, \
+      .entries = sizeof( suite ## _array ) / sizeof(unit_test_case) },
+#define TEST_SUITE_DECL(suite) \
+    extern unit_test_case suite ## _array [];
+>>@<<
+
+This expands the provided suite to a string representation of its name, then an
+array reference, and then a computed size of this array.  We'll see in a moment
+how the test runner can use this information. We also define a
+\verb/TEST_SUITE_BEGIN/ macro and a \verb/TEST_SUITE_END/ macro to automate the
+creation of an array for holding test cases in a test suite.
+
+#[language=c]
+<<FILE:include/modelrunner/test.h>>=
+#define TEST_SUITE_BEGIN(suite) \
+    unit_test_case suite ## _array [] = \
+    {
+#define TEST_SUITE_END() };
+>>@<<
+
+We make a similar expansion as \verb/TEST_SUITE/ for \verb/TEST/. Likewise, the
+\verb/TEST_DECL/ provides us with a way to declare the unit test function.
+
+#[language=c]
+<<FILE:include/modelrunner/test.h>>=
+#define TEST(testcase) \
+    { .name = # testcase, .function=& testcase },
+#define TEST_DECL(testcase) \
+    bool testcase();
+>>@<<
+
+In this expansion, we expand the test case to a string for its name, and then
+take the address of the test case to get a function pointer, which is assigned
+to the function part of this definition. We can combine all of this to set up a
+test runner, but first, let's complete the test header with its epilogue.
+
+#[language=c]
+<<FILE:include/modelrunner/test.h>>=
+<<header-epilogue>>
+>>@<<
+
+The unit test runner includes the \verb/main/ entry point for our unit tests. It
+iterates through each test suite, and then iterates through each unit test in
+each suite. For each unit test, it runs the test. If it passes, it emits a dot.
+If it fails, it emits an exclamation point and the name of the failing test.
+
+#[language=c]
+<<FILE:test/test_runner.c>>=
+#include <modelrunner/test.h>
+#include <stdio.h>
+
+<<test-suite-definition>>
+<<test-runner-helpers>>
+<<test-runner-main>>
+>>@<<
+
+The first thing we do with the test runner is pull in the \verb/test-suites/
+macro.  More on this in a moment.
+
+Next, we define a \verb/main/ entry point that sets up the test suite. The main
+entry point computes some initial tallies, then runs all of the tests.
+
+#[language=c]
+<<test-runner-main>>=
+int main(int argc, char* argv[])
+{
+    size_t tests = sizeof(suite) / sizeof(unit_test_suite);
+    size_t total_suites = 0;
+    size_t total_tests = 0;
+    size_t pass_count = 0;
+    size_t fail_count = 0;
+
+    for (size_t i = 0; i < tests; ++i, ++total_suites)
+    {
+        printf("%s [%zu]: ", suite[i].name, suite[i].entries);
+
+        for (size_t j = 0; j < suite[i].entries; ++j, ++total_tests)
+        {
+            bool testpass = suite[i].array[j].function();
+            if (testpass)
+            {
+                printf(".");
+                ++pass_count;
+            }
+            else
+            {
+                printf("!%s ", suite[i].array[j].name);
+                ++fail_count;
+            }
+        }
+
+        printf("\n");
+    }
+>>@<<
+
+The outer loop in \verb/main/ iterates through the test suites. The name of the
+suite along with the total number of tests is output. Then, the inner loop is
+run over each test. For each test, it is executed. If it passes, a single dot is
+output. If it fails, then an exclamation point along with the name of the
+failing test is output.  Finally, we output the test results.  If all tests
+passed, then we return $0$. If any test fails, we return $1$.
+
+#[language=c]
+<<test-runner-main>>=
+    printf(
+        "\nRan %zu test%s in %zu suite%s: %zu test%s passed and "
+        "%zu test%s failed.\n",
+        total_tests, plural(total_tests), total_suites, plural(total_suites),
+        pass_count, plural(pass_count), fail_count, plural(fail_count));
+
+    if (fail_count > 0)
+        return 1;
+    else
+        return 0;
+}
+>>@<<
+
+We make use of a helper that we call \verb/plural/ in the above tabulation. This
+just makes the English read a little better.  The \verb/plural/ macro expands to
+a simple ternary operator based on comparing the argument with one. If the
+argument is exactly one, then the singular form is used. Otherwise, the plural
+form is used.
+
+#[language=c]
+<<test-runner-helpers>>=
+#define plural(val) ((val == 1) ? "" : "s")
+>>@<<
+
+The \verb/test-suite-definition/ is where the first bit of magic happens. Since
+we are using minweb as our literate programming processor, we can take advantage
+of minweb macros to append test suites on the fly in the rest of the document,
+as we add them.  This definition sets up the possibility.  In the definition, we
+define the \verb/suite/ array and reference a \verb/test-suite/ macro, which
+expands to each of the entries in this array.  When we define a new test suite,
+we simply append to this macro.
+
+Prior to the test suites, we provide three more macros: \verb/test-decls/,
+\verb/test-suite-decls/, and \verb/test-suite-arrays/.  These three macros will
+hold the unit test declarations, the test suite array declarations, and the test
+suite arrays themselves.  These all need to occur before the \verb/suite/ array
+for dependency reasons.
+
+#[language=c]
+<<test-suite-definition>>=
+
+<<test-decls>>
+<<test-suite-decls>>
+<<test-suite-arrays>>
+
+unit_test_suite suite[] =
+{
+    <<test-suite>>
+};
+>>@<<
+
+Finally, we define a macro, \verb/test-suite-arrays/, which is where we will
+store the array definitions for each test suite.  These will all be loaded in
+the test runner at compile time, which links everything together nicely.
+
+We can test the test runner by creating a simple test suite and test in the
+suite to verify that this mechanism works.  First, we add a new test suite,
+which we call, \verb/metatest/. We need to add a declaration to the
+\verb/test-suite-decls/ macro and register it in the \verb/test-suite/ macro.
+
+#[language=c]
+<<test-suite-decls>>=
+TEST_SUITE_DECL(metatest)
+>>@<<
+
+#[language=c]
+<<test-suite>>=
+TEST_SUITE(metatest)
+>>@<<
+
+For this test suite to execute, we use the \verb/TEST_SUITE_BEGIN/ and
+\verb/TEST_SUITE_END/ macros. Inside of these macros, we place a macro for
+holding our unit tests.
+
+#[language=c]
+<<test-suite-arrays>>=
+TEST_SUITE_BEGIN(metatest)
+<<metatest-tests>>
+TEST_SUITE_END()
+>>@<<
+
+<<SECTION:metatest_simple>>=
+Here, we define a \verb/metatest-tests/ macro, which we can use for appending
+tests to our metatest suite. For now, we will append a single unit test,
+\verb/metatest_simple/. In the next section, we will concentrate on marshalling
+data from our document to the unit tests, but for now, we will include a very
+simple pass or fail metric.  We can do this by embedding our interaction in a
+special section, as done in the source for this document. Then, we reference an
+output variable. Our test is currently \colorbox{black}{%[testresult]%}.
+>>@<<
+
+#[language=c]
+<<test-decls>>=
+TEST_DECL(metatest_simple)
+>>@<<
+
+#[language=c]
+<<metatest-tests>>=
+TEST(metatest_simple)
+>>@<<
+
+We declare the unit test in \verb/test-decls/, which makes this symbol
+visible to the suite. Then, we add this test to the suite by adding it to the
+\verb/metatest-tests/ macro that we defined above. This ensures that the test is
+executed as part of our suite.  Now, we can implement a simple test of our test
+runner and testing framework.  The \verb/metatest_simple/ test writes to an
+output file that is incorporated into the above paragraph. The last line of the
+paragraph displays the test status. For now, we just hard code a "passing"
+status and return \verb/true/ to let the test runner know that our unit test
+passed. In the next section, we will improve upon this marshalling and I/O to
+automate this interaction.
+
+#[language=c]
+<<FILE:test/metatest/simple.c>>=
+#include <modelrunner/test.h>
+#include <stdio.h>
+
+bool metatest_simple()
+{
+    FILE* f = fopen("metatest_simple.output", "w");
+    if (NULL == f)
+    {
+        return false;
+    }
+
+    fprintf(f, "testresult=\\textcolor{green}{passing}\n");
+    fclose(f);
+    return true;
+}
+>>@<<
+
+\subsection{Marshalling Unit Test Values}
+
+Not yet implemented.

@@ -12,6 +12,15 @@ possible input or output through the shadow implementation.
 
 [cbmc-link]: https://www.cprover.org/cbmc/
 
+To build this tool, the source files must be extracted.  Create a separate build
+directory, extract the source files, and run the extracted build script.
+
+    mkdir build
+    cd build
+    ../extract.sh
+    ./scripts/build.sh
+    ./scripts/build_document.sh
+
 Scenarios
 ---------
 

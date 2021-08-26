@@ -20,14 +20,16 @@ Finally, it supports extracting settings that can go into a report for other
 literate programming projects.
 
 The first appendix covers how to extract and build the source code for this
-tool.  The remaining sections will cover lexical analysis, parsing, syntax tree
-building, semantic analysis, synthesis, execution, caching, and the
-implementation of the main executable.  Interspersed in these sections are unit
-tests and model checks.  The overall document is fairly long.  For ease of
-development, it is organized into separate pieces that each cover a different
-small aspect of the entire software project. This is done to ensure that
-checkins make sense and that the development process is more natural.
+tool.  The remaining sections will cover literate unit testing, lexical
+analysis, parsing, syntax tree building, semantic analysis, synthesis,
+execution, caching, and the implementation of the main executable.  Interspersed
+in these sections are unit tests and model checks.  The overall document is
+fairly long.  For ease of development, it is organized into separate pieces that
+each cover a different small aspect of the entire software project. This is done
+to ensure that checkins make sense and that the development process is more
+natural.
 
+#[include=src/testharness/testharness.tex]
 #[include=src/lexer/lexer.tex]
 #[include=src/parser/parser.tex]
 #[include=src/ast/ast.tex]
@@ -40,3 +42,4 @@ checkins make sense and that the development process is more natural.
 \appendix
 
 #[include=scripts/building.tex]
+#[include=src/headerstuff/headerstuff.tex]
