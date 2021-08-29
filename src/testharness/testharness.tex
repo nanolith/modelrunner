@@ -35,8 +35,14 @@ for holding unit test cases.
 <<FILE:include/modelrunner/test.h>>=
 <<header-prologue>>
 
+#include <rcpr/allocator.h>
+#include <rcpr/compare.h>
+#include <rcpr/rbtree.h>
+#include <rcpr/resource.h>
+#include <rcpr/resource/protected.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 typedef bool (*unit_test_function)();
 
@@ -112,10 +118,14 @@ We make a similar expansion as \verb/TEST_SUITE/ for \verb/TEST/. Likewise, the
 In this expansion, we expand the test case to a string for its name, and then
 take the address of the test case to get a function pointer, which is assigned
 to the function part of this definition. We can combine all of this to set up a
-test runner, but first, let's complete the test header with its epilogue.
+test runner, but first, let's complete the test header.  We will reference a
+\verb/marshalling-header/ and provide the header epilogue.  The
+\verb/marshalling-header/ is a place holder for the marshalling functionality
+that we will add in the next subsection.
 
 #[language=c]
 <<FILE:include/modelrunner/test.h>>=
+<<marshalling-header>>
 <<header-epilogue>>
 >>@<<
 
@@ -315,4 +325,551 @@ bool metatest_simple()
 
 \subsection{Marshalling Unit Test Values}
 
-Not yet implemented.
+The process of marshalling data from the document key-value pair files to a
+format that we can use in the unit test cases is actually pretty
+straight-forward. The biggest issue is avoiding a lot of overhead and
+duplication in the test cases.  This is easily done by providing functions to do
+the heavy lifting, and macros to wrap these functions.  As with higher-level
+languages, we can map some implicit parameters with the macros to make life a
+bit easier when writing tests.
+
+First, we will define \verb/TEST_BEGIN/ and \verb/TEST_END/ macros. The first
+macro will take one parameter: a string naming the test case. This string will
+be used to construct the input and output file names.  The macro itself will
+read the input file and open the output file for writing.  The \verb/TEST_END/
+macro will close the output file and clean up the \verb/rbtree/ instance that we
+use for storing the input values. The \verb/TEST_ASSERT/ macro returns
+\verb/false/ if the assertion fails, exiting the function. Note that this means
+that the macros can leak memory and resources if the tests fail. Since we are
+typically working with test-driven development (TDD), there will only be a few
+resources leaked at a time if a unit test should fail. This should not be a
+significant concern.
+
+#[language=c]
+<<marshalling-header>>=
+#define TEST_BEGIN(test_name) \
+    FILE* testout; \
+    RCPR_SYM(allocator)* alloc; \
+    RCPR_SYM(rbtree)* dict; \
+    TEST_ASSERT(0 == RCPR_SYM(malloc_allocator_create)(&alloc)); \
+    TEST_ASSERT(0 == read_test_input(&dict, alloc, test_name)); \
+    TEST_ASSERT(0 == create_test_output(&testout, test_name))
+
+#define TEST_END() \
+    TEST_ASSERT( \
+        STATUS_SUCCESS == \
+            RCPR_SYM(resource_release)( \
+                RCPR_SYM(rbtree_resource_handle)(dict))); \
+    TEST_ASSERT(0 == fclose(testout)); \
+    TEST_ASSERT( \
+        STATUS_SUCCESS == \
+            RCPR_SYM(resource_release)( \
+                RCPR_SYM(allocator_resource_handle)(alloc)))
+
+#define TEST_ASSERT(cond) \
+    if (!(cond)) \
+        return false
+>>@<<
+
+We also need to define \verb/read_test_input/ and \verb/create_test_output/. We
+will start with the declarations. The \verb/read_test_input/ function takes a
+pointer to a \verb/rbtree/ pointer and a character string as input. On success,
+it initializes the \verb/dict/ pointer pointer to a \verb/rbtree/ instance that
+has each of the key-value pairs found in the \verb/.input/ file.  The
+\verb/create_test_output/ function creates the \verb/.output/ file associated
+with the \verb/test_name/ parameter and saves it to the \verb/FILE/ pointer
+pointer in the first parameter.  Both functions return $0$ on success and
+non-zero on failure.
+
+#[language=c]
+<<marshalling-header>>=
+int read_test_input(
+    RCPR_SYM(rbtree)** dict, RCPR_SYM(allocator)* alloc, const char* test_name);
+int create_test_output(FILE** fp, const char* test_name);
+>>@<<
+
+We need methods to initialize values based on keys. To keep things simple, and
+to handle tests with multiple values, we will always use an offset integer value
+to represent which value tuple we wish to access.  Thus, we can create functions
+to marshall in data for strings, characters, and integers.  We don't provide an
+exhaustive list of primitive types; for instance, we don't really care about
+floating point values in this tool.  Likewise, we provide \verb/uint64_t/ and
+\verb/int64_t/. Application code can map to smaller numerical values if desired.
+The string version of these methods just map a constant string from the
+underlying \verb/rbtree/ instance. Thus, we don't have to worry about memory
+management.  Here are the declarations for each of the init methods.  They take
+four parameters: the output variable pointer, the rbtree instance, the key, and
+the numerical offset.  So, for instance, the key \verb/actor/ and the offset $2$
+would map to the key \verb/actor2/ in the input file / \verb/rbtree/.
+
+#[language=c]
+<<marshalling-header>>=
+bool read_test_string(
+    const char** var, RCPR_SYM(rbtree)* dict, const char* key, int offset);
+bool read_test_int(
+    int64_t* var, RCPR_SYM(rbtree)* dict, const char* key, int offset);
+bool read_test_uint(
+    uint64_t* var, RCPR_SYM(rbtree)* dict, const char* key, int offset);
+>>@<<
+
+We can use the \verb/TEST_ASSERT/ macro to fail a test if a given read fails. If
+we want to exit a test successfully if a given read fails, we can use the
+\verb/TEST_TRY/ macro below.  In this case, when reading a tuple, the first
+value read should be read with a \verb/TEST_TRY/, and each subsequent value
+should be read with a \verb/TEST_ASSERT/.
+
+#[language=c]
+<<marshalling-header>>=
+#define TEST_TRY(cond) \
+    if (!(cond)) \
+        return true
+>>@<<
+
+We can now look at the implementation of \verb/test_read_input/. We begin this
+method by creating the name of the input file based on the name of the test.
+Then, we create the \verb/rbtree/ instance. Then, we open the input file.
+Finally, we decode each line and add these to the \verb/rbtree/. If everything
+goes to plan, we save the rbtree instance and then do our cleanup. If something
+should fail in these steps, then we will jump to the correct cleanup spot to
+ensure that any resource owned by this function is cleaned up before we return
+to the caller.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input.c>>=
+#include <modelrunner/test.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_rbtree;
+RCPR_IMPORT_resource;
+
+int read_test_input(rbtree** dict, allocator* alloc, const char* test_name)
+{
+    char filename[1024];
+    char* line = NULL;
+    char key[1024];
+    char value[8192];
+    int retval, release_retval;
+    rbtree* tmp = NULL;
+    FILE* f;
+    read_test_input_pair* pair;
+    size_t i;
+
+    <<read-test-input-create-input-filename>>
+    <<read-test-input-create-rbtree>>
+    <<read-test-input-open-file>>
+    <<read-test-input-decode-lines>>
+    <<read-test-input-save>>
+
+    <<read-test-input-cleanup-file>>
+    <<read-test-input-cleanup-rbtree>>
+
+done:
+    return retval;
+}
+>>@<<
+
+To create the input filename, we use \verb/snprintf/ to format a string with
+the input test name and the \verb/.input/ extension.  This could fail if the
+user provides an extra-long test name. So, we verify that the number of bytes
+that would have been written. This must be less than the size of the
+\verb/filename/ variable, to account for the final \verb/NULL/ byte. If it is
+not, an error is returned to the user.
+
+#[language=c]
+<<read-test-input-create-input-filename>>=
+    size_t print_size =
+        snprintf(filename, sizeof(filename), "%s.input", test_name);
+    if (print_size >= sizeof(filename))
+    {
+        retval = 1;
+        goto done;
+    }
+>>@<<
+
+To create the \verb/rbtree/ instance, we call \verb/rbtree_create/, passing it
+the address of our temporary \verb/rbtree/ pointer, our \verb/allocator/, a
+comparison function and a function to get the key from our value inserted into
+the \verb/rbtree/.
+
+#[language=c]
+<<read-test-input-create-rbtree>>=
+    retval =
+        rbtree_create(
+            &tmp, alloc, &test_input_dict_compare, &test_input_dict_key, NULL);
+    if (STATUS_SUCCESS != retval)
+    {
+        goto done;
+    }
+>>@<<
+
+We will revisit the comparison and key functions in a moment.  For now, we will
+just add them to our header.
+
+#[language=c]
+<<marshalling-header>>=
+RCPR_SYM(rcpr_comparison_result) test_input_dict_compare(
+    void* context, const void* lhs, const void* rhs);
+const void* test_input_dict_key(
+    void* context, const RCPR_SYM(resource)* r);
+>>@<<
+
+If something should go wrong during our subsequent operations, we need to clean
+up the \verb/rbtree/ instance. We do this using the label,
+\verb/cleanup_rbtree/. We make use of a special return value that is separate
+from our \verb/retval/ variable to check the return from cleaning up the
+resource. If this cleanup should fail, we still want to go through with the
+remaining cleanup steps, but we want to make sure that an error is returned to
+the caller. In this case, the original error code is replaced with the error
+code we got from this cleanup. When we want to return this rbtree to the user,
+we will set \verb/tmp/ to \verb/NULL/.  This will bypass the cleanup.
+
+<<read-test-input-cleanup-rbtree>>=
+cleanup_rbtree:
+    if (NULL != tmp)
+    {
+        release_retval = resource_release(rbtree_resource_handle(tmp));
+        if (STATUS_SUCCESS != release_retval)
+        {
+            retval = release_retval;
+        }
+    }
+>>@<<
+
+Next, we open the input file. If this should fail, then we will clean up the
+\verb/rbtree/ instance, using our \verb/cleanup_rbtree/ label, and return to the
+caller.
+
+#[language=c]
+<<read-test-input-open-file>>=
+    f = fopen(filename, "r");
+    if (NULL == f)
+    {
+        retval = 1;
+        goto cleanup_rbtree;
+    }
+>>@<<
+
+To clean up the input file handle, we can jump to the \verb/cleanup_file/
+handle. This just calls \verb/fclose/ on the file handle. This label is ordered
+so that \verb/cleanup_rbtree/ happens after this cleanup step, so we can cascade
+cleanup steps.
+
+#[language=c]
+<<read-test-input-cleanup-file>>=
+cleanup_file:
+    fclose(f);
+>>@<<
+
+To decode each line, we first read it into the line buffer. Then, we scan for an
+equal sign. Everything to the left of the equal sign is copied to the key
+buffer, and everything to the right of the equal sign is copied into the value
+buffer. We use \verb/strlcpy/ to ensure that the resulting buffers are NULL
+terminated. While we don't expect to see values in excess of 8 kilobytes, we
+will truncate both the key and the value to 1 kilobyte and 8 kilobytes in size,
+respectively.
+
+We start this loop by reading the input line using \verb/getline/. The
+\verb/getline/ function allocates memory for the line and sets the last
+character of the line to the delimiter character. We fix this up by taking the
+line length, comparing the last character to the delimiter, and ``chomping`` it
+if it is the delimiter.
+
+#[language=c]
+<<read-test-input-decode-lines>>=
+    while (!feof(f))
+    {
+        if (getline(&line, NULL, f) < 0 || feof(f))
+        {
+            break;
+        }
+
+        size_t linelen = strlen(line);
+        if (line[linelen - 1] == '\n')
+        {
+            line[linelen-1] = 0;
+            linelen -= 1;
+        }
+>>@<<
+
+Next, we scan for the first equal sign, which is the delimiter between the key
+and value. If the scan is unsuccessful, this is a malformed line, and an error
+is set. We perform cleanup and exit.  If the delimiter would make the key or the
+value too large, then this is an error, and we perform cleanup and exit.
+Otherwise, we \verb/NULL/ out the delimiter, then copy the left-hand side to the
+key buffer and copy the right-hand side to the value buffer. Once the values are
+copied, we no longer need \verb/line/ and can free it.
+
+#[language=c]
+<<read-test-input-decode-lines>>=
+        for (i = 0; i < linelen; ++i)
+            if (line[i] == '=')
+                break;
+
+        if (i >= linelen)
+        {
+            free(line);
+            retval = 2;
+            goto cleanup_file;
+        }
+
+        if (i > (sizeof(key)) || (linelen - i) > (sizeof(value) - 1))
+        {
+            free(line);
+            retval = 3;
+            goto cleanup_file;
+        }
+
+        line[i] = 0;
+        strlcpy(key, line, sizeof(key));
+        strlcpy(value, line + i + 1, sizeof(value));
+        free(line);
+>>@<<
+
+With the key and the value set, we create a resource to hold this key-value pair
+and insert this resource into the \verb/rbtree/ instance. We use the helper
+function, \verb/read_test_input_pair_create/ to create this pair from the key
+and value.  The resource release method for this pair, called
+\verb/read_test_input_pair_resource_release/, will take care of cleaning up this
+data. Once the pair is created, we can insert it into our \verb/rbtree/. If the
+insert fails, we clean up the pair's resource handle, and return. If the insert
+succeeds, the \verb/rbtree/ instance takes ownership of this pair. Thus
+completes one iteration of this loop. The loop will continue until the end of
+the input file is reached.
+
+#[language=c]
+<<read-test-input-decode-lines>>=
+        retval = read_test_input_pair_create(&pair, alloc, key, value);
+        if (STATUS_SUCCESS != retval)
+        {
+            goto cleanup_file;
+        }
+
+        retval = rbtree_insert(tmp, &pair->hdr);
+        if (STATUS_SUCCESS != retval)
+        {
+            release_retval = resource_release(&pair->hdr);
+            if (STATUS_SUCCESS != release_retval)
+            {
+                retval = release_retval;
+            }
+
+            goto cleanup_file;
+        }
+    }
+>>@<<
+
+Once the loop completes successfully, the \verb/rbtree/ instance is returned to
+the caller by setting \verb/dict/ to this tree. The \verb/tmp/ variable is set
+to \verb/NULL/ since the caller takes ownership of the tree on success. Then, we
+can set the return value to \verb/STATUS_SUCCESS/ and do any last bit of cleanup
+before returning to the caller.
+
+#[language=c]
+<<read-test-input-save>>=
+    *dict = tmp;
+    tmp = NULL;
+    retval = STATUS_SUCCESS;
+    goto cleanup_file;
+>>@<<
+
+We need to add the input pair create and resource management methods to the
+marshalling header. The key pair structure is a \verb/resource/ that holds a
+reference to the \verb/allocator/, needed for cleanup, and a pointer to the key
+and value. The \verb/read_test_input_pair_create/ method creates an instance of
+this pair. The \verb/read_test_input_pair_resource_release/ method is registered
+with the pair \verb/resource/ so it can be used to release this resource when
+\verb/resource_release/ is called on it. This method will clean up the heap
+allocated memory associated with the key and value.
+
+#[language=c]
+<<marshalling-header>>=
+typedef struct read_test_input_pair read_test_input_pair;
+struct read_test_input_pair
+{
+    RCPR_SYM(resource) hdr;
+    RCPR_SYM(allocator)* alloc;
+    const char* key;
+    const char* value;
+};
+
+status read_test_input_pair_create(
+    read_test_input_pair** pair, RCPR_SYM(allocator)* alloc, const char* key,
+    const char* value);
+status read_test_input_pair_resource_release(RCPR_SYM(resource)* r);
+>>@<<
+
+The pair creation method allocates memory to hold the pair.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input_pair_create.c>>=
+#include <modelrunner/test.h>
+#include <rcpr/allocator.h>
+#include <string.h>
+
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_resource;
+
+status read_test_input_pair_create(
+    read_test_input_pair** pair, RCPR_SYM(allocator)* alloc, const char* key,
+    const char* value)
+{
+    read_test_input_pair* tmp = NULL;
+    status retval, release_retval;
+
+    retval = allocator_allocate(alloc, (void**)&tmp, sizeof(*tmp));
+    if (STATUS_SUCCESS != retval)
+    {
+        goto done;
+    }
+>>@<<
+
+Next, the allocated memory is cleared and the resource handle is set up as a
+\verb/resource/.  This associates the resource release method for the pair with
+the resource handle.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input_pair_create.c>>=
+    memset(tmp, 0, sizeof(*tmp));
+    resource_init(&tmp->hdr, &read_test_input_pair_resource_release);
+>>@<<
+
+Next, the allocator is saved.  The key and value variables are duplicated onto
+the heap. These duplicate pointers are saved in the pair. If either of the
+string duplications fail, then the structure is cleaned up by releasing it, and
+this function returns an error code.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input_pair_create.c>>=
+    tmp->alloc = alloc;
+    tmp->key = strdup(key);
+    tmp->value = strdup(value);
+    if (NULL == tmp->key || NULL == tmp->value)
+    {
+        retval = 1;
+        goto cleanup_tmp;
+    }
+>>@<<
+
+Finally, if everything was set up successfully, the pair variable is updated
+with this newly created pair, and \verb/STATUS_SUCCESS/ is returned to the
+caller.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input_pair_create.c>>=
+    *pair = tmp;
+    retval = STATUS_SUCCESS;
+    goto done;
+>>@<<
+
+If something does fail, the \verb/cleanup_tmp/ label is jumped to, which does
+the resource release on this pair. Our resource release function knows how to
+deal with partially constructed resources, so this exit point works no matter
+which part fails.  This cleanup falls through into the \verb/done/ label, which
+is jumped to directly if either an error occurs in allocation or if this
+function exits successfully.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input_pair_create.c>>=
+cleanup_tmp:
+    release_retval = resource_release(&tmp->hdr);
+    if (STATUS_SUCCESS != release_retval)
+    {
+        retval = release_retval;
+    }
+
+done:
+    return retval;
+}
+>>@<<
+
+Next, we can describe \verb/read_test_input_pair_resource_release/. This
+function takes a \verb/resource/ associated with the pair, casts it back to the
+pair, then frees memory associated with the key and value (if they are set). It
+then releases the memory associated with the pair itself.
+
+#[language=c]
+<<FILE:src/testharness/read_test_input_pair_resource_release.c>>=
+#include <modelrunner/test.h>
+#include <stdlib.h>
+
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_resource;
+
+status read_test_input_pair_resource_release(resource* r)
+{
+    read_test_input_pair* pair = (read_test_input_pair*)r;
+
+    allocator* alloc = pair->alloc;
+
+    if (NULL != pair->key)
+    {
+        free((void*)pair->key);
+    }
+
+    if (NULL != pair->value)
+    {
+        free((void*)pair->value);
+    }
+
+    return allocator_reclaim(alloc, pair);
+}
+>>@<<
+
+In order to organize the \verb/rbtree/ instance, we need to define both a key
+comparison and a key extraction method. The key comparison method is
+\verb/test_input_dict_compare/. This method takes an optional context, a
+left-hand side and a right-hand side for the comparison. We will be comparing
+strings, since our keys are strings. So, we can implement this comparison
+function in terms of \verb/strcmp/. This function performs a lexicographical
+comparison between two strings. It returns the result of this comparison. If the
+result is less than zero, then the left-hand string is less than the right-hand
+string.  If the result is greater than zero, then the left-hand string is
+greater than the right-hand string. If the result is zero, both strings are
+equal.
+
+#[language=c]
+<<FILE:src/testharness/test_input_dict_compare.c>>=
+#include <modelrunner/test.h>
+#include <string.h>
+
+RCPR_IMPORT_compare;
+
+rcpr_comparison_result test_input_dict_compare(
+    void* context, const void* lhs, const void* rhs)
+{
+    const char* left = (const char*)lhs;
+    const char* right = (const char*)rhs;
+
+    int retval = strcmp(left, right);
+
+    if (retval < 0)
+        return RCPR_COMPARE_LT;
+    else if (left > 0)
+        return RCPR_COMPARE_GT;
+    else
+        return RCPR_COMPARE_EQ;
+}
+>>@<<
+
+The key extraction method is \verb/test_input_dict_key/. This method takes an
+optional context and a \verb/resource/ pointer to the value stored in the
+\verb/rbtree/.  In this case, the resource pointer is our pair.  We extract the
+key from this pair, and return it as a type erased pointer.
+
+#[language=c]
+<<FILE:src/testharness/test_input_dict_key.c>>=
+#include <modelrunner/test.h>
+
+RCPR_IMPORT_resource;
+
+const void* test_input_dict_key(
+    void* context, const resource* r)
+{
+    const read_test_input_pair* pair = (const read_test_input_pair*)r;
+
+    return pair->key;
+}
+>>@<<
