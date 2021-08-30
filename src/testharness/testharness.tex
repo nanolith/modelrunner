@@ -348,12 +348,13 @@ significant concern.
 #[language=c]
 <<marshalling-header>>=
 #define TEST_BEGIN(test_name) \
+    bool test_success = true; \
     FILE* testout; \
     RCPR_SYM(allocator)* alloc; \
     RCPR_SYM(rbtree)* dict; \
     TEST_ASSERT(0 == RCPR_SYM(malloc_allocator_create)(&alloc)); \
-    TEST_ASSERT(0 == read_test_input(&dict, alloc, test_name)); \
-    TEST_ASSERT(0 == create_test_output(&testout, test_name))
+    TEST_ASSERT(0 == read_test_input(&dict, alloc, # test_name)); \
+    TEST_ASSERT(0 == create_test_output(&testout, # test_name))
 
 #define TEST_END() \
     TEST_ASSERT( \
@@ -368,7 +369,14 @@ significant concern.
 
 #define TEST_ASSERT(cond) \
     if (!(cond)) \
-        return false
+    { \
+        fclose(testout); \
+        return false; \
+    } \
+    do { } while (0)
+
+#define TEST_FAILURE(cond) \
+    test_success = false
 >>@<<
 
 We also need to define \verb/read_test_input/ and \verb/create_test_output/. We
@@ -416,13 +424,18 @@ We can use the \verb/TEST_ASSERT/ macro to fail a test if a given read fails. If
 we want to exit a test successfully if a given read fails, we can use the
 \verb/TEST_TRY/ macro below.  In this case, when reading a tuple, the first
 value read should be read with a \verb/TEST_TRY/, and each subsequent value
-should be read with a \verb/TEST_ASSERT/.
+should be read with a \verb/TEST_ASSERT/. Note that if a previous iteration
+failed with \verb/TEST_FAILURE/, then \verb/TEST_TRY/ will return \verb/false/.
 
 #[language=c]
 <<marshalling-header>>=
 #define TEST_TRY(cond) \
     if (!(cond)) \
-        return true
+    { \
+        fclose(testout); \
+        return test_success; \
+    } \
+    do { } while (0)
 >>@<<
 
 We can now look at the implementation of \verb/test_read_input/. We begin this
@@ -449,6 +462,7 @@ int read_test_input(rbtree** dict, allocator* alloc, const char* test_name)
 {
     char filename[1024];
     char* line = NULL;
+    size_t line_size = 0;
     char key[1024];
     char value[8192];
     int retval, release_retval;
@@ -581,7 +595,7 @@ if it is the delimiter.
 <<read-test-input-decode-lines>>=
     while (!feof(f))
     {
-        if (getline(&line, NULL, f) < 0 || feof(f))
+        if (getline(&line, &line_size, f) < 0)
         {
             break;
         }
@@ -626,6 +640,8 @@ copied, we no longer need \verb/line/ and can free it.
         strlcpy(key, line, sizeof(key));
         strlcpy(value, line + i + 1, sizeof(value));
         free(line);
+        line = NULL;
+        line_size = 0;
 >>@<<
 
 With the key and the value set, we create a resource to hold this key-value pair
@@ -847,7 +863,7 @@ rcpr_comparison_result test_input_dict_compare(
 
     if (retval < 0)
         return RCPR_COMPARE_LT;
-    else if (left > 0)
+    else if (retval > 0)
         return RCPR_COMPARE_GT;
     else
         return RCPR_COMPARE_EQ;
@@ -871,5 +887,285 @@ const void* test_input_dict_key(
     const read_test_input_pair* pair = (const read_test_input_pair*)r;
 
     return pair->key;
+}
+>>@<<
+
+The \verb/create_test_output/ function opens an output file for storing the
+variable results from a given test case.  As with \verb/read_test_input/, it
+creates a filename, in this case, an \verb/.output/ filename, based on the test
+name. As before, we need to check the return value of \verb/snprintf/ to ensure
+that the entire test name was written to the filename. This must be less than
+the size of the \verb/filename/ variable, to account for the final \verb/NULL/
+byte. If it is not, then an error is returned to the user.
+
+The file is opened for writing. If this step fails, then \verb/fopen/ returns
+\verb/NULL/, and we return an error code to the caller.  Otherwise, we can exit
+successfully.
+
+#[language=c]
+<<FILE:src/testharness/create_test_output.c>>=
+#include <modelrunner/test.h>
+
+int create_test_output(FILE** fp, const char* test_name)
+{
+    char filename[1024];
+
+    size_t print_size =
+        snprintf(filename, sizeof(filename), "%s.output", test_name);
+    if (print_size >= sizeof(filename))
+    {
+        return 1;
+    }
+
+    *fp = fopen(filename, "w");
+    if (NULL == *fp)
+    {
+        return 1;
+    }
+
+    return 0;
+}
+>>@<<
+
+To read values into the test case, we have \verb/read_test_string/,
+\verb/read_test_int/, and \verb/read_test_uint/. We will build macros to
+simplify the usage of these in a moment, but for now, we can focus on
+implementing these functions. We can implement the latter two functions in terms
+of the first function. The first thing we do is create a key that includes the
+offset value. This uses \verb/snprintf/, and as before, we must verify the
+output of \verb/snprintf/ to ensure that the value was not truncated. We then
+use this key to attempt to find a resource via \verb/rbtree_find/. If the find
+fails, or the \verb/resource/ is \verb/NULL/, then the lookup fails. Otherwise,
+we extract the value from the resource. If this value is NULL, then the lookup
+fails.  Otherwise, we return the value to the caller.
+
+#[language=c]
+<<FILE:src/testharness/read_test_string.c>>=
+#include <modelrunner/test.h>
+
+RCPR_IMPORT_rbtree;
+RCPR_IMPORT_resource;
+
+bool read_test_string(
+    const char** var, rbtree* dict, const char* key, int offset)
+{
+    read_test_input_pair* pair;
+    char xkey[1024];
+    status retval;
+
+    size_t print_size = snprintf(xkey, sizeof(xkey), "%s%d", key, offset);
+    if (print_size >= sizeof(xkey))
+    {
+        return false;
+    }
+
+    retval = rbtree_find((resource**)&pair, dict, xkey);
+    if (STATUS_SUCCESS != retval)
+    {
+        return false;
+    }
+
+    if (NULL == pair || NULL == pair->value)
+    {
+        return false;
+    }
+
+    *var = pair->value;
+    return true;
+}
+>>@<<
+
+We can write \verb/read_test_int/ in terms of \verb/read_test_string/. We use
+\verb/strtoll/ to convert the string representation of the value to an
+\verb/int64_t/ value. Since this is for testing, we don't do much checking on
+this input value. If you send garbage input to the test, expect garbage output.
+We cast this value to \verb/int64_t/, since on some platforms, it's possible
+that \verb/long long/ is bigger.
+
+#[language=c]
+<<FILE:src/testharness/read_test_int.c>>=
+#include <modelrunner/test.h>
+#include <stdlib.h>
+
+RCPR_IMPORT_rbtree;
+
+bool read_test_int(int64_t* var, rbtree* dict, const char* key, int offset)
+{
+    const char* val = NULL;
+    long long ival;
+
+    if (!read_test_string(&val, dict, key, offset))
+    {
+        return false;
+    }
+
+    ival = strtoll(val, NULL, 10);
+    *var = (int64_t)ival;
+    return true;
+}
+>>@<<
+
+Finally, \verb/read_test_uint/ works almost exactly like \verb/read_test_int/,
+except that it uses \verb/strtoull/, which returns the unsigned representation
+of a given string. Note that this function can still process negative numbers;
+it just returns the unsigned representation of this negative number. Again,
+these methods aren't meant to police input data for unit tests. Garbage in /
+garbage out.
+
+#[language=c]
+<<FILE:src/testharness/read_test_uint.c>>=
+#include <modelrunner/test.h>
+#include <stdlib.h>
+
+RCPR_IMPORT_rbtree;
+
+bool read_test_uint(uint64_t* var, rbtree* dict, const char* key, int offset)
+{
+    const char* val = NULL;
+    unsigned long long uval;
+
+    if (!read_test_string(&val, dict, key, offset))
+    {
+        return false;
+    }
+
+    uval = strtoll(val, NULL, 10);
+    *var = (uint64_t)uval;
+    return true;
+}
+>>@<<
+
+There is no reason to extend the cognitive load of the file pointer and
+dictionary to the user. We can make these arguments implicit by writing some
+macros that plug in the missing arguments. We will call these macros
+\verb/READ_STRING/, \verb/READ_INT/, and \verb/READ_UINT/.
+
+#[language=c]
+<<marshalling-header>>=
+#define READ_STRING(var, key, offset) \
+    read_test_string((var), dict, (key), (offset))
+#define READ_INT(var, key, offset) \
+    read_test_int((var), dict, (key), (offset))
+#define READ_UINT(var, key, offset) \
+    read_test_uint((var), dict, (key), (offset))
+>>@<<
+
+Likewise, we can create the write equivalents to these macros. In each, we use
+\verb/fprintf/ to write the key, offset, and value.
+
+#[language=c]
+<<marshalling-header>>=
+#define WRITE_STRING(val, key, offset) \
+    fprintf(testout, "%s%d=%s\n", key, offset, val)
+#define WRITE_INT(val, key, offset) \
+    fprintf(testout, "%s%d=%lld\n", key, offset, val)
+#define WRITE_UINT(val, key, offset) \
+    fprintf(testout, "%s%d=%llu\n", key, offset, val)
+>>@<<
+
+In a lot of cases, we actually want to write the value to the output file
+immediately after reading it.  So, we create some helper read / write macros.
+
+#[language=c]
+<<marshalling-header>>=
+#define READ_WRITE_STRING(var, key, offset) \
+    (READ_STRING(var, key, offset) ? WRITE_STRING(*(var), key, offset) : false)
+#define READ_WRITE_INT(var, key, offset) \
+    (READ_INT(var, key, offset) ? WRITE_INT(*(var), key, offset) : false)
+#define READ_WRITE_UINT(var, key, offset) \
+    (READ_UINT(var, key, offset) ? WRITE_UINT(*(var), key, offset) : false)
+>>@<<
+
+Finally, we may want to provide a success or failure indication to our test
+documentation. For this, two macros, \verb/WRITE_SUCCESS/ and
+\verb/WRITE_FAILURE/ can be used. They output a \LaTeX formatted string with
+text color.  We use red for failure and green for success.
+
+#[language=c]
+<<marshalling-header>>=
+#define WRITE_SUCCESS(key, offset) \
+    fprintf(testout, "%s%d=\\textcolor{green}{success}\n", key, offset);
+#define WRITE_FAILURE(key, offset) \
+    fprintf(testout, "%s%d=\\textcolor{red}{failure}\n", key, offset);
+>>@<<
+
+In the next section, we will put all of this together into an embedded unit
+test.
+
+\subsection{Example Unit Test}
+
+We will extend the metatest suite with one more unit test case, which will
+attempt to verify the given truth table for the exclusive or operator.
+
+<<SECTION:metatest_example>>=
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+$x$        & $y$        & $x$ xor $y$         & result        & status \\
+\hline
+$%[x0=0]%$ & $%[y0=0]%$ & $%[expected0=0]%$   & $%[result0]%$ & %[status0]% \\
+\hline
+$%[x1=0]%$ & $%[y1=1]%$ & $%[expected1=1]%$   & $%[result1]%$ & %[status1]% \\
+\hline
+$%[x2=1]%$ & $%[y2=0]%$ & $%[expected2=1]%$   & $%[result2]%$ & %[status2]% \\
+\hline
+$%[x3=1]%$ & $%[y3=1]%$ & $%[expected3=0]%$   & $%[result3]%$ & %[status3]% \\
+\hline
+\end{tabular}
+\end{center}
+>>@<<
+
+To create our new test, we add it to our test declarations and register it to
+the metatest suite.
+
+#[language=c]
+<<test-decls>>=
+TEST_DECL(metatest_example)
+>>@<<
+
+#[language=c]
+<<metatest-tests>>=
+TEST(metatest_example)
+>>@<<
+
+We can now create our unit test. Here, we make use of \verb/TEST_BEGIN/,
+\verb/TEST_END/, \verb/READ_INT/, \verb/WRITE_INT/, \verb/WRITE_SUCCESS/, and
+\verb/WRITE_FAILURE/.  The results will appear in the above table.
+
+#[language=c]
+<<FILE:test/metatest/example.c>>=
+#include <modelrunner/test.h>
+
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_rbtree;
+RCPR_IMPORT_resource;
+
+bool metatest_example()
+{
+    int offset = 0;
+    int64_t x;
+    int64_t y;
+    int64_t expected;
+    int64_t result;
+
+    TEST_BEGIN(metatest_example);
+        for(;;++offset)
+        {
+            TEST_TRY(READ_WRITE_INT(&x, "x", offset));
+            TEST_ASSERT(READ_WRITE_INT(&y, "y", offset));
+            TEST_ASSERT(READ_WRITE_INT(&expected, "expected", offset));
+            result = x ^ y;
+            WRITE_INT(result, "result", offset);
+            if (result == expected)
+            {
+                WRITE_SUCCESS("status", offset);
+            }
+            else
+            {
+                WRITE_FAILURE("status", offset);
+                TEST_FAILURE();
+            }
+        }
+    TEST_END();
 }
 >>@<<

@@ -98,7 +98,7 @@ runner's main method.
 #[language=sh]
 <<FILE:scripts/build.sh>>=
 objects=`find src -name "*.o" -print`
-objects_except_main=`echo $objects | grep -v main.c.o`
+objects_except_main=`find src -name "*.o" -print | grep -v main.c.o`
 testobjects=`find test -name "*.o" -print`
 LDFLAGS="$LDFLAGS `pkg-config --libs rcpr`"
 #link modelrunner
@@ -109,11 +109,27 @@ if [ $? -ne 0 ]; then
 fi
 
 #link testmodelrunner
-$CC -o testmodelrunner $objects_except_main $testobjects $LDFLAGS
+$CC -o testmodelrunner $testobjects $objects_except_main $LDFLAGS
 if [ $? -ne 0 ]; then
     echo "Test link failed."
     exit 1
 fi #$
+>>@<<
+
+Before running the test runner, we need to extract all test inputs and clean up
+all test outputs from previous test runs.  The \verb/minextract/ utility has a
+\verb/-L/ option which lists all of the test sections. We iterate thorugh this
+list, extracting all of the input files and deleting all of the output files.
+
+#[language=sh]
+<<FILE:scripts/build.sh>>=
+filename=../modelrunner.tex
+tests=`minextract -L $filename`
+
+for n in $tests; do
+    rm -f $n.output
+    minextract -S $n $filename
+done #$
 >>@<<
 
 Finally, we always execute the unit tests as part of the build process.
