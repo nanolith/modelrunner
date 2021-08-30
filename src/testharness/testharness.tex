@@ -74,6 +74,8 @@ struct unit_test_suite
 };
 >>@<<
 
+\newpage
+
 The \verb/unit_test_suite/ has a name, an array, and a number of entries in the
 suite. Now, we can create some helper macros that will make life easier for
 defining test suites and test cases. The first macro, \verb/TEST_SUITE/, will
@@ -144,6 +146,8 @@ If it fails, it emits an exclamation point and the name of the failing test.
 <<test-runner-main>>
 >>@<<
 
+\newpage
+
 The first thing we do with the test runner is pull in the \verb/test-suites/
 macro.  More on this in a moment.
 
@@ -204,6 +208,8 @@ passed, then we return $0$. If any test fails, we return $1$.
         return 0;
 }
 >>@<<
+
+\newpage
 
 We make use of a helper that we call \verb/plural/ in the above tabulation. This
 just makes the English read a little better.  The \verb/plural/ macro expands to
@@ -323,6 +329,8 @@ bool metatest_simple()
 }
 >>@<<
 
+\newpage
+
 \subsection{Marshalling Unit Test Values}
 
 The process of marshalling data from the document key-value pair files to a
@@ -396,6 +404,8 @@ int read_test_input(
 int create_test_output(FILE** fp, const char* test_name);
 >>@<<
 
+\newpage
+
 We need methods to initialize values based on keys. To keep things simple, and
 to handle tests with multiple values, we will always use an offset integer value
 to represent which value tuple we wish to access.  Thus, we can create functions
@@ -454,23 +464,11 @@ to the caller.
 #include <stdlib.h>
 #include <string.h>
 
-RCPR_IMPORT_allocator;
-RCPR_IMPORT_rbtree;
-RCPR_IMPORT_resource;
+<<rcpr-imports>>
 
 int read_test_input(rbtree** dict, allocator* alloc, const char* test_name)
 {
-    char filename[1024];
-    char* line = NULL;
-    size_t line_size = 0;
-    char key[1024];
-    char value[8192];
-    int retval, release_retval;
-    rbtree* tmp = NULL;
-    FILE* f;
-    read_test_input_pair* pair;
-    size_t i;
-
+    <<read-test-input-variables>>
     <<read-test-input-create-input-filename>>
     <<read-test-input-create-rbtree>>
     <<read-test-input-open-file>>
@@ -483,6 +481,41 @@ int read_test_input(rbtree** dict, allocator* alloc, const char* test_name)
 done:
     return retval;
 }
+>>@<<
+
+The rcpr-imports macro is used repeatedly. This is boilerplate that we can
+deduplicate here.
+
+<<rcpr-imports>>=
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_compare;
+RCPR_IMPORT_rbtree;
+RCPR_IMPORT_resource;
+>>@<<
+
+We use the following variables in this method. The \verb/filename/ variable
+holds the computed filename.  Then, \verb/line/ and \verb/line_size/ are used
+for reading lines from the input file. The \verb/key/ and \verb/value/ variables
+are used to split the line into a key and value pair.  The \verb/retval/ and
+\verb/release_retval/ variables are used for determining whether functions
+called by this function succeed or fail. The \verb/tmp/ \verb/rbtree/ pointer is
+used to store the \verb/rbtree/ we create until we can determine whether we
+should destroy this instance due to an error or return it to the caller. The
+\verb/f/ variable holds our input file. Then \verb/pair/ is used for each pair
+that we create, and \verb/i/ is used during our scan for an equal sign.
+
+#[language=c]
+<<read-test-input-variables>>=
+    char filename[1024];
+    char* line = NULL;
+    size_t line_size = 0;
+    char key[1024];
+    char value[8192];
+    int retval, release_retval;
+    rbtree* tmp = NULL;
+    FILE* f;
+    read_test_input_pair* pair;
+    size_t i;
 >>@<<
 
 To create the input filename, we use \verb/snprintf/ to format a string with
@@ -608,6 +641,8 @@ if it is the delimiter.
         }
 >>@<<
 
+\newpage
+
 Next, we scan for the first equal sign, which is the delimiter between the key
 and value. If the scan is unsuccessful, this is a malformed line, and an error
 is set. We perform cleanup and exit.  If the delimiter would make the key or the
@@ -677,6 +712,8 @@ the input file is reached.
     }
 >>@<<
 
+\newpage
+
 Once the loop completes successfully, the \verb/rbtree/ instance is returned to
 the caller by setting \verb/dict/ to this tree. The \verb/tmp/ variable is set
 to \verb/NULL/ since the caller takes ownership of the tree on success. Then, we
@@ -725,8 +762,7 @@ The pair creation method allocates memory to hold the pair.
 #include <rcpr/allocator.h>
 #include <string.h>
 
-RCPR_IMPORT_allocator;
-RCPR_IMPORT_resource;
+<<rcpr-imports>>
 
 status read_test_input_pair_create(
     read_test_input_pair** pair, RCPR_SYM(allocator)* alloc, const char* key,
@@ -801,6 +837,8 @@ done:
 }
 >>@<<
 
+\newpage
+
 Next, we can describe \verb/read_test_input_pair_resource_release/. This
 function takes a \verb/resource/ associated with the pair, casts it back to the
 pair, then frees memory associated with the key and value (if they are set). It
@@ -811,8 +849,7 @@ then releases the memory associated with the pair itself.
 #include <modelrunner/test.h>
 #include <stdlib.h>
 
-RCPR_IMPORT_allocator;
-RCPR_IMPORT_resource;
+<<rcpr-imports>>
 
 status read_test_input_pair_resource_release(resource* r)
 {
@@ -851,7 +888,7 @@ equal.
 #include <modelrunner/test.h>
 #include <string.h>
 
-RCPR_IMPORT_compare;
+<<rcpr-imports>>
 
 rcpr_comparison_result test_input_dict_compare(
     void* context, const void* lhs, const void* rhs)
@@ -870,6 +907,8 @@ rcpr_comparison_result test_input_dict_compare(
 }
 >>@<<
 
+\newpage
+
 The key extraction method is \verb/test_input_dict_key/. This method takes an
 optional context and a \verb/resource/ pointer to the value stored in the
 \verb/rbtree/.  In this case, the resource pointer is our pair.  We extract the
@@ -879,7 +918,7 @@ key from this pair, and return it as a type erased pointer.
 <<FILE:src/testharness/test_input_dict_key.c>>=
 #include <modelrunner/test.h>
 
-RCPR_IMPORT_resource;
+<<rcpr-imports>>
 
 const void* test_input_dict_key(
     void* context, const resource* r)
@@ -927,6 +966,8 @@ int create_test_output(FILE** fp, const char* test_name)
 }
 >>@<<
 
+\newpage
+
 To read values into the test case, we have \verb/read_test_string/,
 \verb/read_test_int/, and \verb/read_test_uint/. We will build macros to
 simplify the usage of these in a moment, but for now, we can focus on
@@ -943,8 +984,7 @@ fails.  Otherwise, we return the value to the caller.
 <<FILE:src/testharness/read_test_string.c>>=
 #include <modelrunner/test.h>
 
-RCPR_IMPORT_rbtree;
-RCPR_IMPORT_resource;
+<<rcpr-imports>>
 
 bool read_test_string(
     const char** var, rbtree* dict, const char* key, int offset)
@@ -975,6 +1015,8 @@ bool read_test_string(
 }
 >>@<<
 
+\newpage
+
 We can write \verb/read_test_int/ in terms of \verb/read_test_string/. We use
 \verb/strtoll/ to convert the string representation of the value to an
 \verb/int64_t/ value. Since this is for testing, we don't do much checking on
@@ -987,7 +1029,7 @@ that \verb/long long/ is bigger.
 #include <modelrunner/test.h>
 #include <stdlib.h>
 
-RCPR_IMPORT_rbtree;
+<<rcpr-imports>>
 
 bool read_test_int(int64_t* var, rbtree* dict, const char* key, int offset)
 {
@@ -1017,7 +1059,7 @@ garbage out.
 #include <modelrunner/test.h>
 #include <stdlib.h>
 
-RCPR_IMPORT_rbtree;
+<<rcpr-imports>>
 
 bool read_test_uint(uint64_t* var, rbtree* dict, const char* key, int offset)
 {
@@ -1034,6 +1076,8 @@ bool read_test_uint(uint64_t* var, rbtree* dict, const char* key, int offset)
     return true;
 }
 >>@<<
+
+\newpage
 
 There is no reason to extend the cognitive load of the file pointer and
 dictionary to the user. We can make these arguments implicit by writing some
@@ -1092,6 +1136,8 @@ text color.  We use red for failure and green for success.
 In the next section, we will put all of this together into an embedded unit
 test.
 
+\newpage
+
 \subsection{Example Unit Test}
 
 We will extend the metatest suite with one more unit test case, which will
@@ -1136,9 +1182,7 @@ We can now create our unit test. Here, we make use of \verb/TEST_BEGIN/,
 <<FILE:test/metatest/example.c>>=
 #include <modelrunner/test.h>
 
-RCPR_IMPORT_allocator;
-RCPR_IMPORT_rbtree;
-RCPR_IMPORT_resource;
+<<rcpr-imports>>
 
 bool metatest_example()
 {
