@@ -351,7 +351,8 @@ use for storing the input values. The \verb/TEST_ASSERT/ macro returns
 that the macros can leak memory and resources if the tests fail. Since we are
 typically working with test-driven development (TDD), there will only be a few
 resources leaked at a time if a unit test should fail. This should not be a
-significant concern.
+significant concern. Finally, the \verb/TEST_END/ macro will return the running
+status of the function. No code should be written after \verb/TEST_END/.
 
 #[language=c]
 <<marshalling-header>>=
@@ -373,7 +374,8 @@ significant concern.
     TEST_ASSERT( \
         STATUS_SUCCESS == \
             RCPR_SYM(resource_release)( \
-                RCPR_SYM(allocator_resource_handle)(alloc)))
+                RCPR_SYM(allocator_resource_handle)(alloc))); \
+    return test_success
 
 #define TEST_ASSERT(cond) \
     if (!(cond)) \
