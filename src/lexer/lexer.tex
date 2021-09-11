@@ -1,3 +1,481 @@
 \section{Lexical Analysis}
 
-Not yet implemented.
+The first step of building our scenario language is to reduce the input to a
+series of tokens. Each token will represent a particular type of input, which we
+will then use when we construct our parser. There are six kinds of tokens:
+keywords, structural tokens, assignments, identifiers, globs, and special.
+Keywords are specific terms, like \verb/rootdir/, \verb/set/, \verb/set+/,
+\verb/sourcefiles/, \verb/scenario/, or \verb/require/. These terms have
+meanings and help to give our scenarios structure. Structural tokens, such as
+\verb/{/ or \verb/}/, are used to begin or end sections. Identifiers are a
+restricted form of globs that always start with an alphabet character or
+underscore, then contain any number of alphanumeric or underscore characters.
+These are case sensitive, and are used for naming certain sections. Assignments
+are any glob that contain an equal sign. Then, globs cover any other token.
+Whitespace separates tokens from each other. When whitespace is needed in a
+glob, a double quote can be used to surround the glob. This double quote will be
+stripped from the glob, but any quote symbols within the glob can be escaped
+with a backslash.  These lexical rules aren't perfect, but they should cover a
+useful subset of scenarios and filename descriptions.  The purpose of this
+language isn't to support any possible filename, but to make it easier to
+represent model checking scenarios within a literate programming document.  The
+final token type is the special token type.
+
+We also want to track filename, line, and column information in our lexical
+analyzer.  This data will be useful for emitting meaningful errors in the
+parser. Since we are dealing with the output of a literate tool, we will add a
+special token to allow this tool to manipulate our filename and line
+information. In order to ensure that this remains compatible with C, we will
+use the same preprocessing directive used in C for this purpose: \verb/#line/.
+The \verb/#line/ preprocessing directive in C takes one mandatory argument --
+the line number of the line following this line -- and one optional argument.
+The optional argument is the filename. This directive requires a newline
+immediately after the last argument. This newline is important in order to
+continue the token stream where it left off.  The lexer treats this as
+out-of-band data and handles it internally. The user of the lexer -- typically
+the parser -- can't read these tokens. The lexer takes care of them and elides
+them from the output.
+
+We will start our lexer header with the enumeration of token types. Then, we
+will describe types needed by the lexer, and finally, we will describe functions
+needed by the lexer.  Each of these sections will be filled in as we touch on
+concepts relating to them.
+
+#[language=c]
+<<FILE:include/modelrunner/lexer.h>>=
+<<header-prologue>>
+#include <rcpr/psock.h>
+#include <rcpr/resource.h>
+#include <rcpr/resource/protected.h>
+<<lexer-token-enumeration>>
+<<lexer-types>>
+<<lexer-functions>>
+<<header-epilogue>>
+>>@<<
+
+The token enumeration will hold each of the tokens we define.
+
+#[language=c]
+<<lexer-token-enumeration>>=
+enum lexer_token
+{
+    <<lexer-token-enum>>
+};
+>>@<<
+
+\subsection{Lexer Basics}
+
+To parse these tokens, we will first need to build a lexer instance. This
+instance will be based on the type \verb/lexer/, which we can define as a
+\verb/resource/. At a minimum, the resource will need an allocator reference for
+handling cleanup. Then, we can add additional members to this structure as
+needed, by appending to the \verb/lexer-struct-members/ macro.
+
+#[language=c]
+<<lexer-types>>=
+typedef struct lexer lexer;
+struct lexer
+{
+    RCPR_SYM(resource) hdr;
+    RCPR_SYM(allocator)* alloc;
+    <<lexer-struct-members>>
+};
+>>@<<
+
+The lexer will be initialized with the variables \verb/curline/, \verb/curcol/,
+\verb/startline/, \verb/startcol/, \verb/endline/, and \verb/endcol/, which will
+track the start and end position of tokens, as well as the running position. It
+will need \verb/token_buffer/, \verb/token_buffer_size/, and
+\verb/token_buffer_offset/ variables to hold the current dynamic token buffer,
+its total size, and the current offset into which we are appending data. We will
+also include a \verb/filename/, which caches the name of the current input
+filename.
+
+#[language=c]
+<<lexer-struct-members>>=
+    char* filename;
+    size_t curline;
+    size_t curcol;
+    size_t startline;
+    size_t startcol;
+    size_t endline;
+    size_t endcol;
+    char* token_buffer;
+    size_t token_buffer_size;
+    size_t token_buffer_offset;
+>>@<<
+
+In order for the lexer to work, it has to pull data from a stream.  This stream
+needs to come from somewhere.  The \verb/RCPR/ library has an interface known as
+\verb/psock/, which includes a \verb/psock_read/ method. We can make use of this
+interface to read data both from files and from arbitrary streams, such as
+string streams.  We will use the latter for testing.  We will also need a
+``putback'' facility, which allows us to read ahead in the stream and put this
+value back if we aren't going to consume it.  This look-ahead allows us to
+analyze more complex input.  Thus, we will add a \verb/stream/ (\verb/psock/)
+and a \verb/putback/ buffer with \verb/putback_offset/.  We will size the latter
+buffer so that we can manage as much lookahead as is required.
+
+#[language=c]
+<<lexer-struct-members>>=
+    RCPR_SYM(psock)* stream;
+    char putback[16];
+    size_t putback_offset;
+>>@<<
+
+\subsection{Creating a Lexical Analyzer}
+
+Before we can parse individual tokens, we need code to create the lexical
+analyzer resource and to release this resource when it is no longer needed. We
+will create a function called \verb/lexer_create/ to create a new lexer
+instance, and \verb/lexer_resource_handle/ to return the resource handle for
+this instance.  This resource handle can then be passed to
+\verb/resource_release/ to release it when the caller no longer needs it.
+
+#[language=c]
+<<lexer-functions>>=
+status lexer_create(
+    lexer** l, RCPR_SYM(allocator)* a, RCPR_SYM(psock)* s,
+    const char* filename);
+RCPR_SYM(resource)* lexer_resource_handle(lexer* l);
+>>@<<
+
+The \verb/lexer_create/ function takes an allocator instance and a psock
+instance. On success, it assigns a new lexer instance to the \verb/l/ pointer
+pointer, and returns \verb/STATUS_SUCCESS/.  The \verb/lexer_resource_handle/
+function returns the resource handle for this lexer instance.  Its definition is
+as follows.
+
+<<FILE:src/lexer/lexer_resource_handle.c>>=
+#include <modelrunner/lexer.h>
+
+RCPR_IMPORT_resource;
+
+resource* lexer_resource_handle(lexer* l)
+{
+    return &l->hdr;
+}
+>>@<<
+
+To test that this resource handle function works correctly, we first need to
+create a test suite for the lexical analyzer.  We do this by extending the test
+suite section and the test suite arrays section mentioned in the test harness
+section with a new test suite.
+
+#[language=c]
+<<test-suite>>=
+TEST_SUITE(lexer)
+>>@<<
+
+#[language=c]
+<<test-suite-arrays>>=
+TEST_SUITE_BEGIN(lexer)
+<<lexer-tests>>
+TEST_SUITE_END()
+>>@<<
+
+<<SECTION:test_lexer_resource_handle>>=
+Now, we can define a unit test for the resource handle function. This test will
+create a lexer instance, get its resource handle, compare it to the original
+pointer, and then release this handle. This just ensures that simple creation
+and tear-down work correctly.  This test ran with
+\colorbox{black}{%[testresult0]%}.
+>>@<<
+
+To add this test, we need to add it to our list of test declarations and to our
+list of tests to be executed in the test suite.
+
+#[language=c]
+<<test-decls>>=
+TEST_DECL(test_lexer_resource_handle)
+>>@<<
+
+#[language=c]
+<<lexer-tests>>=
+TEST(test_lexer_resource_handle)
+>>@<<
+
+The test itself works exactly as described above.
+
+#[language=c]
+<<FILE:test/lexer/test_lexer_resource_handle.c>>=
+#include <modelrunner/lexer.h>
+#include <modelrunner/test.h>
+#include <string.h>
+
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_psock;
+RCPR_IMPORT_resource;
+
+bool test_lexer_resource_handle()
+{
+    lexer* l = NULL;
+    psock* sock = NULL;
+    resource* handle = NULL;
+    const char* inp = "test input";
+
+    TEST_BEGIN(test_lexer_resource_handle);
+        TEST_ASSERT(
+            STATUS_SUCCESS
+                == psock_create_from_buffer(
+                        &sock, alloc, inp, strlen(inp)));
+        TEST_ASSERT(STATUS_SUCCESS == lexer_create(&l, alloc, sock, "test.x"));
+        handle = lexer_resource_handle(l);
+        if ((void*)l == (void*)handle)
+        {
+            WRITE_SUCCESS("testresult", 0);
+        }
+        else
+        {
+            WRITE_FAILURE("testresult", 0);
+            TEST_FAILURE();
+        }
+        TEST_ASSERT(STATUS_SUCCESS == resource_release(handle));
+    TEST_END();
+}
+>>@<<
+
+The \verb/lexer_create/ function allocates memory for the lexer instance,
+initializes it as a resource, sets the initial values, creates a token buffer,
+and returns the whole mess to the caller. It also handles back-tracking and
+cleanup should any of these steps fail.
+
+#[language=c]
+<<FILE:src/lexer/lexer_create.c>>=
+#include <modelrunner/lexer.h>
+#include <string.h>
+
+RCPR_IMPORT_allocator;
+RCPR_IMPORT_psock;
+RCPR_IMPORT_resource;
+
+<<lexer_create_decls>>
+
+status lexer_create(lexer** l, allocator* a, psock* s, const char* filename)
+{
+    <<lexer_create_localvars>>
+    <<lexer_create_allocation>>
+    <<lexer_create_resource_init>>
+    <<lexer_create_set_values>>
+    <<lexer_create_create_token_buffer>>
+    <<lexer_create_return_to_caller>>
+    <<lexer_create_cleanup>>
+}
+
+<<lexer_create_defs>>
+>>@<<
+
+We'll start with memory allocation for the instance.  This is pretty
+straight-forward: we use the \verb/tmp/ variable to hold the instance as we
+build it, so we don't change the \verb/l/ parameter until everything succeeds.
+After allocation, we clear the memory to ensure that everything is in a known
+good state.
+
+#[language=c]
+<<lexer_create_localvars>>=
+    status retval, release_retval;
+    lexer* tmp;
+>>@<<
+
+#[language=c]
+<<lexer_create_allocation>>=
+    retval = allocator_allocate(a, (void**)&tmp, sizeof(lexer));
+    if (STATUS_SUCCESS != retval)
+    {
+        goto done;
+    }
+>>@<<
+
+If allocation fails, we exit the function, returning the failure code.
+
+#[language=c]
+<<lexer_create_cleanup>>=
+done:
+    return retval;
+>>@<<
+
+The allocator does not guarantee that memory is cleared, so we clear it.
+
+#[language=c]
+<<lexer_create_allocation>>=
+    memset(tmp, 0, sizeof(*tmp));
+>>@<<
+
+The lexer instance is a resource. This means that it has a special resource
+release method, which is called when the caller releases its resource handle.
+This release method is called \verb/lexer_resource_release/.
+
+#[language=c]
+<<lexer_create_decls>>=
+static status lexer_resource_release(resource* r);
+>>@<<
+
+The this function effectively tears down this instance, releasing all resources
+that it owns.  Working backward, we can clean up all of these resources by
+examining the structure.  The structure has a \verb/filename/, which is
+duplicated based on either the initial input parameter or as part of a list
+preprocessor override. It has a token buffer, which is written to during lexical
+analysis. It has a \verb/psock/ stream from which it reads. We can tear down
+each of these resources in turn, and accumulate errors to return to the caller,
+if there are any errors.
+
+#[language=c]
+<<lexer_create_defs>>=
+static status lexer_resource_release(resource* r)
+{
+    status release_retval;
+    status retval = STATUS_SUCCESS;
+    lexer* l = (lexer*)r;
+
+    allocator* a = l->alloc;
+
+    release_retval = allocator_reclaim(a, l->filename);
+    if (STATUS_SUCCESS != release_retval) retval = release_retval;
+    release_retval = allocator_reclaim(a, l->token_buffer);
+    if (STATUS_SUCCESS != release_retval) retval = release_retval;
+    release_retval = resource_release(psock_resource_handle(l->stream));
+    if (STATUS_SUCCESS != release_retval) retval = release_retval;
+    release_retval = allocator_reclaim(a, l);
+    if (STATUS_SUCCESS != release_retval) retval = release_retval;
+
+    return retval;
+}
+>>@<<
+
+With the resource release method defined, we can get back to using it in order
+to initialize the lexer resource in \verb/lexer_create/.
+
+#[language=c]
+<<lexer_create_resource_init>>=
+    resource_init(&tmp->hdr, &lexer_resource_release);
+>>@<<
+
+We can now set the initial values for the lexer. We cache the allocator used to
+create this instance, and we duplicate the filename from the input parameter.
+
+#[language=c]
+<<lexer_create_set_values>>=
+    tmp->alloc = a;
+    tmp->filename = strdup(filename);
+>>@<<
+
+String duplication can fail, and if it does, we want to clean up the lexer
+structure. At this point, the resource has not been fully created, so we must
+clean it up piecemeal.  In this case, we can just reclaim the memory we
+allocated for the instance on failure.
+
+#[language=c]
+<<lexer_create_set_values>>=
+    if (NULL == tmp->filename)
+    {
+        retval = ERROR_GENERAL_OUT_OF_MEMORY;
+        goto reclaim_lexer_instance;
+    }
+>>@<<
+
+#[language=c]
+<<lexer_create_cleanup>>=
+reclaim_lexer_instance:
+    release_retval = allocator_reclaim(a, tmp);
+    if (STATUS_SUCCESS != release_retval)
+    {
+        retval = release_retval;
+    }
+
+    goto done;
+>>@<<
+
+The allocator reclaim could fail, at which point, we want to make sure that the
+error code is bubbled up. Succeed or fail, we jump to \verb/done/ in order to
+exit the function.  Each of the cleanup steps will be chained together like this
+to ensure that the piecemeal cleanup is done as an unwinding action.
+
+The current line, or \verb/curline/, is set to $1$. All other positions are
+set to $0$. As the lexer reads input, it will always start on the first line,
+but will count columns as it encounters characters. Since this structure was
+cleared out, all values are $0$ or \verb/NULL/ by default.
+
+#[language=c]
+<<lexer_create_set_values>>=
+    tmp->curline = 1;
+>>@<<
+
+On success, the lexer instance takes ownership of the \verb/psock/ stream. We
+set the value here.
+
+#[language=c]
+<<lexer_create_set_values>>=
+    tmp->stream = s;
+>>@<<
+
+By default, we set the maximum size of the token buffer to $16$ kilobytes.
+This should be more than sufficient size for any token we will encounter. If we
+encounter a token larger than this, we will simply truncate it.
+
+#[language=c]
+<<lexer_create_decls>>=
+#define TOKEN_BUFFER_MAX_SIZE   16384
+>>@<<
+
+We then allocate the token buffer. If allocation fails, we will unwind the
+creation of the lexer instance.
+
+#[language=c]
+<<lexer_create_create_token_buffer>>=
+    retval =
+        allocator_allocate(
+            a, (void**)&tmp->token_buffer, TOKEN_BUFFER_MAX_SIZE);
+    if (STATUS_SUCCESS != retval)
+    {
+        goto cleanup_filename;
+    }
+>>@<<
+
+The next step of the unwind is to reclaim memory for the filename. Since we are
+using the malloc allocator, we can just use the allocator reclaim method.
+
+#[language=c]
+<<lexer_create_cleanup>>=
+cleanup_filename:
+    release_retval = allocator_reclaim(a, tmp->filename);
+    if (STATUS_SUCCESS != release_retval)
+    {
+        retval = release_retval;
+    }
+
+    goto reclaim_lexer_instance;
+>>@<<
+
+The next step in the unwind is to jump to \verb/reclaim_lexer_instance/, which
+continues cleanup with our previous cleanup step. If all steps to this point
+have succeeded, then we can return the temporary instance to the caller. At this
+point, the caller can call \verb/resource_release/ on the lexer's resource
+handle in order to release this resource when the caller no longer needs it.
+Also, the instance invariants have all been set, so we can treat this instance
+as a "live" instance. So, we assign this instance to the caller's output
+variable and return a successful status code, to let the caller know that the
+creation process was successful.
+
+#[language=c]
+<<lexer_create_return_to_caller>>=
+    *l = tmp;
+    retval = STATUS_SUCCESS;
+    goto done;
+>>@<<
+
+\subsection{Line Preprocessor Statements}
+
+The first of the supported tokens will be the preprocessor line token.  It
+starts with a newline, then has a hash character, any number of whitespace
+characters, and a sequence of ``line'', followed by at least one argument, then
+a newline.  It will \emph{not} be emitted to the caller. Instead, it will update
+the internal state of the lexer to change the display of the line number and
+filename.
+
+We will first define a lexical token for lines, which we will use just as an
+internal place holder.
+
+#[language=c]
+<<lexer-token-enum>>=
+    LEXER_TOKEN_INTERNAL_PREPROCESSOR_LINE,
+>>@<<
